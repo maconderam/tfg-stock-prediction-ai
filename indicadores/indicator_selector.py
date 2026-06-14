@@ -54,6 +54,7 @@ class IndicatorSelector:
         self,
         data: pd.DataFrame,
         target=None,
+        min_kepts: int = 300,
         n_mcpt: int = 200,
         p_threshold: float = 0.10,
         custom_grids: Optional[dict] = None,
@@ -62,6 +63,7 @@ class IndicatorSelector:
     ):
         self.data = data.copy()
         self.target = target
+        self.min_kepts = min_kepts
         self.n_mcpt = n_mcpt
         self.p_threshold = p_threshold
         self.seed = seed
@@ -107,7 +109,7 @@ class IndicatorSelector:
                 _stdout = sys.stdout
                 sys.stdout = io.StringIO()
 
-            res = mcpt.mcpt_threshold(signal, n_test=self.n_mcpt)
+            res = mcpt.mcpt_threshold(signal, n_test=self.n_mcpt, min_kept=self.min_kepts)
 
             if not self.verbose:
                 sys.stdout = _stdout

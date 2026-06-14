@@ -2,11 +2,8 @@ import numpy as np
 import pandas as pd
 
 class ThresholdEvaluator:
-    def __init__(self, data: pd.DataFrame):
-        self.data = data
-        self.returns = np.log(
-            self.data["close"].shift(-1) / self.data["close"]
-        )
+    def __init__(self, returns: pd.DataFrame):
+        self.returns = returns
         self.fracs = np.array([0.99, 0.95, 0.90, 0.80, 0.70, 0.60, 0.50,
                                0.40, 0.30, 0.20, 0.10, 0.05, 0.01])
         self.optimized_threshold = {}

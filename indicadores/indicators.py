@@ -56,6 +56,17 @@ class Indicator(ABC):
     def get_result(self) -> pd.DataFrame:
         return self.result
 
+    def get_signal(self, col: str = None) -> pd.Series:
+        if self.result is None:
+            raise RuntimeError("Call compute() first")
+        if col is None:
+            if len(self.result.columns) == 1:
+                return self.result.iloc[:, 0]
+            raise ValueError(f"Specify col. Available: {list(self.result.columns)}")
+        if col not in self.result.columns:
+            raise ValueError(f"Column '{col}' not found. Available: {list(self.result.columns)}")
+        return self.result[col]
+
     def calculate_entropy(self) -> dict:
         if self.result is None:
             raise ValueError("You must run compute() first")
@@ -138,7 +149,7 @@ class Indicator(ABC):
         return self.stats
 
 class RSI(Indicator):
-    def __init__(self, data, window=30, smooth_window=3):
+    def __init__(self, data: pd.DataFrame, window: int = 30, smooth_window: int = 3):
         super().__init__(
             data, 
             name="RSI", 
@@ -165,7 +176,7 @@ class RSI(Indicator):
         return self.result
 
 class Stochastic(Indicator):
-    def __init__(self, data, window=30, smooth_window=3):
+    def __init__(self, data: pd.DataFrame, window: int = 30, smooth_window: int = 3):
         super().__init__(
             data,
             name="Stochastic",
@@ -203,7 +214,7 @@ class Stochastic(Indicator):
         return self.result
 
 class StochasticRSI(Indicator):
-    def __init__(self, data, rsi_window=30, stoch_window=5, smooth_window=3):
+    def __init__(self, data: pd.DataFrame, rsi_window: int = 30, stoch_window: int = 5, smooth_window: int = 3):
         super().__init__(
             data,
             name="StochasticRSI",
@@ -239,7 +250,7 @@ class StochasticRSI(Indicator):
         return self.result
 
 class MACD(Indicator):
-    def __init__(self, data, long_window=12, short_window=26, smooth_window=9):
+    def __init__(self, data: pd.DataFrame, long_window: int = 12, short_window: int = 26, smooth_window: int = 9):
         super().__init__(
             data, 
             name="MACD", 
@@ -278,7 +289,7 @@ class MACD(Indicator):
         return self.result
 
 class PriceIntensity(Indicator):
-    def __init__(self, data, smooth_window=10):
+    def __init__(self, data: pd.DataFrame, smooth_window: int = 10):
         super().__init__(
             data, 
             name="PriceIntensity", 

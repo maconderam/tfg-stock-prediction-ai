@@ -56,6 +56,17 @@ class Target(ABC):
     def get_result(self) -> pd.DataFrame:
         return self.result
 
+    def get_signal(self, col: str = None) -> pd.Series:
+        if self.result is None:
+            raise RuntimeError("Call compute() first")
+        if col is None:
+            if len(self.result.columns) == 1:
+                return self.result.iloc[:, 0]
+            raise ValueError(f"Specify col. Available: {list(self.result.columns)}")
+        if col not in self.result.columns:
+            raise ValueError(f"Column '{col}' not found. Available: {list(self.result.columns)}")
+        return self.result[col]
+
     def calculate_entropy(self) -> dict:
         if self.result is None:
             raise ValueError("You must run compute() first")
@@ -136,7 +147,7 @@ class Target(ABC):
         return self.stats
 
 class NormalizedFutureReturn(Target):
-    def __init__(self, data, horizon=1, method="atr", window=14):
+    def __init__(self, data: pd.DataFrame, horizon: int = 1, method: str = "atr", window: int = 14):
         super().__init__(
             data, 
             name="NormalizedFutureReturn", 

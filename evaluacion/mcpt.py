@@ -6,7 +6,8 @@ from .thresholds import ThresholdEvaluator
 class MonteCarloPT:
     def __init__(self, data: pd.DataFrame, seed: int = 42):
         self.data = data.copy()
-        self.te = ThresholdEvaluator(self.data)
+        self.returns = np.log(self.data["close"].shift(-1) / self.data["close"])
+        self.te = ThresholdEvaluator(self.returns)
         self.results_mc = None
         self.real_result = None
         self.work_return = None
@@ -15,7 +16,7 @@ class MonteCarloPT:
     def _score(self, result: dict) -> float:
         return max(result["pf_high"], result["pf_low"])
 
-    def mcpt_threshold(self, signal, n_test=100, flip_sign=False) -> dict:
+    def mcpt_threshold(self, signal: pd.Series, n_test: int = 100, min_kept: int = 300, flip_sign: bool = False, verbose: bool = False) -> dict:
         self.signal_name = signal.name
         self.work_return = self.te.prepare(signal, flip_sign=flip_sign).get_work_returns()
 
@@ -23,13 +24,13 @@ class MonteCarloPT:
         mc_high_thr = []
         mc_low_thr = []
 
-        real = self.te.find_optimized_threshold()
+        real = self.te.find_optimized_threshold(min_kept=min_kept)
         real_score = self._score(real)
 
         for _ in range(n_test):
             self.te.set_work_returns(self.rng.permutation(self.work_return))
 
-            res = self.te.find_optimized_threshold()
+            res = self.te.find_optimized_threshold(min_kept=min_kept)
 
             mc_scores.append(self._score(res))
             mc_high_thr.append(res["high_thresh"])
@@ -55,8 +56,13 @@ class MonteCarloPT:
             "mc_distribution": mc_scores
         }
 
-        self.summary()
+        if verbose:
+            self.summary()
+
         return self.results_mc
+    
+    def mcpt_model(self, model, features: list, target: str, n_test: int = 100) -> dict:
+        raise NotImplementedError("MCPT for models is not implemented yet")
 
     # ---------------------------------------------------------
     def summary(self):
