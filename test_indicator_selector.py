@@ -17,9 +17,3 @@ plt.show()
 
 fig2 = sel.plot_mc_distributions(top_n=6)  # distribuciones MC
 plt.show()
-
-# Grid personalizado (sobreescribe defaults)
-sel2 = IndicatorSelector(
-    df,
-    custom_grids={"RSI": {"window": [7, 14, 21], "smooth_window": [2, 3]}}
-)

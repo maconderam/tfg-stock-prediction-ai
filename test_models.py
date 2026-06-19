@@ -18,13 +18,13 @@ from indicadores.targets import NormalizedFutureReturn
 df = pd.read_csv("datos/procesados/BTCUSDT_1d_01-01-2016_18-01-2026.csv")
 df = df.dropna()
 
-features = ["rsi_7", "%K_7", "%D_7"]
+features = ["rsi_7_3", "%K_14_3", "%D_14_3"]
 target   = "nfr_1_atr_14"
  
 # ------------------------------------------------------------------
 # 2. Walk-forward
 # ------------------------------------------------------------------
-#"""
+
 sklearn_pipe = Pipeline([
     ("regresion", LinearRegression())
 ])
@@ -35,9 +35,12 @@ wf = WalkForwardEvaluator(df, train_window=500, test_window=100)
 # Para modelos
 fold_results, predictions_df = wf.run_model(
     model,
-    features=["rsi_7", "%K_7", "%D_7"],
-    target="nfr_1_atr_14",
-    min_kept=30
+    features=features,
+    target=target,
+    min_kept=30,
+    mcpt = True,
+    n_mcpt=20,
+    mcpt_mode="retrain"
 )
 
 signal = predictions_df["y_pred"]
@@ -49,7 +52,10 @@ fig1.show()
 
 fig2 = viz.plot_walkforward_metrics()
 fig2.show()
-#"""
+
+fig = viz.plot_mcpt_metrics()
+fig.show()
+
 
 # Para indicadores
 """
