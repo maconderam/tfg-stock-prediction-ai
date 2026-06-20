@@ -1,55 +1,61 @@
 import itertools
 import warnings
+import io
+import sys
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from typing import Optional
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from typing import Optional, List, Dict, Any
 
-from .indicators import RSI, Stochastic, StochasticRSI, MACD, PriceIntensity
+from .indicators import (
+    RSI, Stochastic, StochasticRSI, MACD, PriceIntensity,
+    ADX, Aroon, AroonOscillator, ATR, PriceChangeOscillator,
+    PriceVarianceRatio, ChangeVarianceRatio, CMMA, MADifference,
+    IntradayIntensity, ChaikinMoneyFlow,
+)
 from evaluacion.mcpt import MonteCarloPT
 
 # ---------------------------------------------------------------------------
-# Default parameter grids for each indicator class
+# Grillas de parámetros por defecto para cada clase de indicador
 # ---------------------------------------------------------------------------
 DEFAULT_GRIDS = {
-    "RSI": {
-        "window":        [10, 14, 20, 30],
-        "smooth_window": [3, 5],
-    },
-    "Stochastic": {
-        "window":        [10, 14, 20, 30],
-        "smooth_window": [3, 5],
-    },
-    "StochasticRSI": {
-        "rsi_window":    [14, 20, 30],
-        "stoch_window":  [5, 10],
-        "smooth_window": [3, 5],
-    },
-    "MACD": {
-        "long_window":   [12, 20],
-        "short_window":  [26, 40],
-        "smooth_window": [9, 12],
-    },
-    "PriceIntensity": {
-        "smooth_window": [5, 10, 20, 30],
-    },
+    "RSI": {"window": [7, 10, 14, 20, 30, 50], "smooth_window": [2, 3, 5]},
+    "Stochastic": {"window": [7, 10, 14, 20, 30, 50], "smooth_window": [2, 3, 5]},
+    "StochasticRSI": {"rsi_window": [10, 14, 20, 30], "stoch_window": [3, 5, 10], "smooth_window": [2, 3]},
+    "MACD": {"short_length": [8, 12, 16], "long_length": [20, 26, 35, 50], "smooth_window": [9]},
+    "PriceIntensity": {"smooth_window": [5, 10, 14, 20, 30, 50]},
+    "ADX": {"window": [7, 10, 14, 20, 30, 50]},
+    "Aroon": {"window": [10, 14, 20, 30, 50, 100]},
+    "AroonOscillator": {"window": [10, 14, 20, 30, 50, 100]},
+    "PriceChangeOscillator": {"short_length": [5, 10, 20], "mult": [2, 3, 5]},
+    "PriceVarianceRatio": {"short_length": [5, 10, 20], "mult": [2, 4, 6]},
+    "ChangeVarianceRatio": {"short_length": [5, 10, 20], "mult": [2, 4, 6]},
+    "CMMA": {"window": [5, 10, 20, 50], "atr_window": [14, 60, 252], "c": [1.0]},
+    "MADifference": {"short_length": [5, 10, 20], "long_length": [50, 100, 150], "lag": [0]},
+    "IntradayIntensity": {"window": [7, 14, 21, 30], "smooth_window": [1, 5, 10]},
+    "ChaikinMoneyFlow": {"window": [7, 10, 14, 21, 30, 50]},
 }
 
-# Map name → class
 _INDICATOR_CLASSES = {
-    "RSI":            RSI,
-    "Stochastic":     Stochastic,
-    "StochasticRSI":  StochasticRSI,
-    "MACD":           MACD,
-    "PriceIntensity": PriceIntensity,
+    "RSI": RSI, "Stochastic": Stochastic, "StochasticRSI": StochasticRSI,
+    "MACD": MACD, "PriceIntensity": PriceIntensity, "ADX": ADX,
+    "Aroon": Aroon, "AroonOscillator": AroonOscillator,
+    "PriceChangeOscillator": PriceChangeOscillator, "PriceVarianceRatio": PriceVarianceRatio,
+    "ChangeVarianceRatio": ChangeVarianceRatio, "CMMA": CMMA,
+    "MADifference": MADifference, "IntradayIntensity": IntradayIntensity,
+    "ChaikinMoneyFlow": ChaikinMoneyFlow,
 }
 
-
-# ---------------------------------------------------------------------------
-# IndicatorSelector
-# ---------------------------------------------------------------------------
 class IndicatorSelector:
+    """
+    Motor de Grid Search y Selección de Características protegido por Monte Carlo.
+
+    Evalúa múltiples combinaciones de parámetros sobre indicadores técnicos, mitigando el 
+    sesgo de sobreajuste mediante pruebas de permutación de Monte Carlo (MCPT). Calcula
+    un puntaje compuesto institucional que pondera la ganancia económica y la significancia estadística.
+    """
+
     def __init__(
         self,
         data: pd.DataFrame,
@@ -57,10 +63,23 @@ class IndicatorSelector:
         min_kepts: int = 300,
         n_mcpt: int = 200,
         p_threshold: float = 0.10,
-        custom_grids: Optional[dict] = None,
+        custom_grids: Optional[Dict[str, Any]] = None,
         seed: int = 42,
         verbose: bool = False,
     ):
+        """
+        Inicializa el Selector de Indicadores.
+
+        Args:
+            data (pd.DataFrame): Datos históricos del activo financiero (OHLCV).
+            target (Any, optional): Variable objetivo. Defaults to None.
+            min_kepts (int, optional): Mínimo de operaciones retenidas en MCPT. Defaults to 300.
+            n_mcpt (int, optional): Número de permutaciones aleatorias de Monte Carlo. Defaults to 200.
+            p_threshold (float, optional): Umbral para declarar significancia estadística. Defaults to 0.10.
+            custom_grids (dict, optional): Parámetros de usuario para sobreescribir la grilla. Defaults to None.
+            seed (int, optional): Semilla pseudoaleatoria para reproducibilidad. Defaults to 42.
+            verbose (bool, optional): Muestra logs detallados si es True. Defaults to False.
+        """
         self.data = data.copy()
         self.target = target
         self.min_kepts = min_kepts
@@ -69,7 +88,6 @@ class IndicatorSelector:
         self.seed = seed
         self.verbose = verbose
 
-        # Merge default grids with any user overrides
         self.grids = {k: dict(v) for k, v in DEFAULT_GRIDS.items()}
         if custom_grids:
             for name, params in custom_grids.items():
@@ -78,34 +96,28 @@ class IndicatorSelector:
                 else:
                     self.grids[name] = params
 
-        self.results: list[dict] = []
+        self.results: List[Dict[str, Any]] = []
         self.summary_df: Optional[pd.DataFrame] = None
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
-    def _param_combinations(grid: dict) -> list[dict]:
-        """Return all combinations of a parameter grid as a list of dicts."""
+    def _param_combinations(grid: dict) -> List[dict]:
+        """Calcula el producto cartesiano de los parámetros de la grilla."""
         keys = list(grid.keys())
         values = list(grid.values())
         return [dict(zip(keys, combo)) for combo in itertools.product(*values)]
 
     def _build_indicator(self, name: str, params: dict):
-        """Instantiate an indicator by name with given params."""
+        """Instancia dinámicamente un objeto indicador a partir de su mapa de clase."""
         cls = _INDICATOR_CLASSES[name]
         return cls(self.data, **params)
 
     def _evaluate_signal(self, signal: pd.Series, name: str) -> dict:
-        """Run MCPT on a single signal column and return metrics dict."""
+        """Ejecuta una evaluación de permutación MCPT de forma aislada."""
         mcpt = MonteCarloPT(self.data, seed=self.seed)
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # Suppress internal print output unless verbose
             if not self.verbose:
-                import io, sys
                 _stdout = sys.stdout
                 sys.stdout = io.StringIO()
 
@@ -115,32 +127,34 @@ class IndicatorSelector:
                 sys.stdout = _stdout
 
         return {
-            "real_score":        res["real_score"],
-            "pf_high":           res["real"]["pf_high"],
-            "pf_low":            res["real"]["pf_low"],
-            "high_thresh":       res["real"]["high_thresh"],
-            "low_thresh":        res["real"]["low_thresh"],
-            "p_value":           res["p_value"],
-            "mc_mean_score":     res["mc_mean_score"],
-            "mc_std_score":      res["mc_std_score"],
-            "mc_distribution":   res["mc_distribution"],
-            "signal_name":       name,
+            "real_score": res["real_score"],
+            "pf_high": res["real"]["pf_high"],
+            "pf_low": res["real"]["pf_low"],
+            "high_thresh": res["real"]["high_thresh"],
+            "low_thresh": res["real"]["low_thresh"],
+            "p_value": res["p_value"],
+            "mc_mean_score": res["mc_mean_score"],
+            "mc_std_score": res["mc_std_score"],
+            "mc_distribution": res["mc_distribution"],
+            "signal_name": name,
         }
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def run(self, indicators: Optional[List[str]] = None) -> pd.DataFrame:
+        """
+        Ejecuta el Grid Search y el filtrado estadístico masivo.
 
-    def run(self, indicators: Optional[list[str]] = None) -> pd.DataFrame:
+        Args:
+            indicators (list, optional): Lista de indicadores a optimizar. Si es None,
+                ejecuta todos los disponibles de la grilla. Defaults to None.
+
+        Returns:
+            pd.DataFrame: Resultados ordenados bajo la métrica del puntaje compuesto.
+        """
         if indicators is None:
             indicators = list(self.grids.keys())
 
         self.results = []
-        total = sum(
-            len(self._param_combinations(self.grids[ind]))
-            for ind in indicators
-            if ind in self.grids
-        )
+        total = sum(len(self._param_combinations(self.grids[ind])) for ind in indicators if ind in self.grids)
         done = 0
 
         for ind_name in indicators:
@@ -163,36 +177,27 @@ class IndicatorSelector:
                 for col in result_df.columns:
                     signal = result_df[col].dropna()
                     if len(signal) < 100:
-                        warnings.warn(
-                            f"[{col}] too few observations ({len(signal)}), skipping."
-                        )
+                        warnings.warn(f"[{col}] too few observations ({len(signal)}), skipping.")
                         continue
 
-                    print(
-                        f"[{done}/{total}] Evaluating {col} ...",
-                        end="\r",
-                        flush=True,
-                    )
+                    print(f"[{done}/{total}] Evaluating {col} ...", end="\r", flush=True)
 
                     try:
-                        metrics = self._evaluate_signal(
-                            result_df[col].rename(col), col
-                        )
+                        metrics = self._evaluate_signal(result_df[col].rename(col), col)
                     except Exception as e:
                         warnings.warn(f"[{col}] MCPT failed: {e}")
                         continue
 
                     row = {
-                        "indicator":    ind_name,
-                        "signal":       col,
+                        "indicator": ind_name,
+                        "signal": col,
                         **{f"param_{k}": v for k, v in params.items()},
-                        **{k: v for k, v in metrics.items()
-                           if k != "mc_distribution"},
-                        "_mc_dist":     metrics["mc_distribution"],
+                        **{k: v for k, v in metrics.items() if k != "mc_distribution"},
+                        "_mc_dist": metrics["mc_distribution"],
                     }
                     self.results.append(row)
 
-        print()  # newline after \r progress
+        print()  # Liberar retorno de carro del print dinámico
 
         if not self.results:
             print("No results collected.")
@@ -200,16 +205,24 @@ class IndicatorSelector:
 
         df = pd.DataFrame(self.results)
 
-        # --- Composite ranking score -------------------------------------------
-        # Normalise profit factor (higher = better) and p-value (lower = better)
+        # --- Mitigación de Infinitos en Profit Factor ---
+        df["real_score"] = df["real_score"].replace([np.inf, -np.inf], np.nan)
+        max_finite_score = df["real_score"].max()
+        df["real_score"] = df["real_score"].fillna(max_finite_score if pd.notna(max_finite_score) else 5.0)
+
+        # --- Escalamiento Robustecido (Min-Max) para Profit Factor ---
         pf_min, pf_max = df["real_score"].min(), df["real_score"].max()
         pf_range = pf_max - pf_min if pf_max != pf_min else 1.0
         df["pf_norm"] = (df["real_score"] - pf_min) / pf_range
 
-        pv_min, pv_max = df["p_value"].min(), df["p_value"].max()
-        pv_range = pv_max - pv_min if pv_max != pv_min else 1.0
-        df["pv_norm"] = 1 - (df["p_value"] - pv_min) / pv_range  # inverted
+        # --- Robustecimiento Estadístico para P-values (Transformación de Información) ---
+        epsilon = 1e-5
+        df["log_p"] = -np.log10(df["p_value"] + epsilon)
+        lp_min, lp_max = df["log_p"].min(), df["log_p"].max()
+        lp_range = lp_max - lp_min if lp_max != lp_min else 1.0
+        df["pv_norm"] = (df["log_p"] - lp_min) / lp_range
 
+        # --- Puntaje Compuesto: Balance Alpha vs Ruido Estadístico ---
         df["composite_score"] = 0.6 * df["pf_norm"] + 0.4 * df["pv_norm"]
         df["significant"] = df["p_value"] <= self.p_threshold
 
@@ -220,6 +233,7 @@ class IndicatorSelector:
         return df
 
     def get_summary(self, only_significant: bool = False) -> pd.DataFrame:
+        """Devuelve una vista simplificada y ordenada de los resultados."""
         if self.summary_df is None:
             raise RuntimeError("Call run() first.")
 
@@ -238,125 +252,124 @@ class IndicatorSelector:
         return df[display_cols + param_cols].copy()
 
     def top_n(self, n: int = 10, only_significant: bool = True) -> pd.DataFrame:
+        """Retorna las N mejores estrategias del ranking."""
         return self.get_summary(only_significant=only_significant).head(n)
 
-    # ------------------------------------------------------------------
-    # Plotting
-    # ------------------------------------------------------------------
-
-    def plot_summary(
-        self,
-        top_n: int = 20,
-        only_significant: bool = False,
-        figsize: tuple = (16, 10),
-    ) -> plt.Figure:
+    def plot_summary(self, top_n: int = 20, only_significant: bool = False) -> go.Figure:
+        """Genera un dashboard interactivo en Plotly con 4 paneles de diagnóstico alpha."""
         if self.summary_df is None:
             raise RuntimeError("Call run() first.")
 
         df = self.get_summary(only_significant=only_significant).head(top_n)
-
         if df.empty:
             print("No data to plot.")
             return None
 
+        param_cols = [c for c in df.columns if c.startswith("param_")]
+
+        def hover_text(row):
+            params_str = "<br>".join(f"{c.replace('param_', '')}: {row[c]}" for c in param_cols)
+            return (
+                f"<b>{row['signal']}</b><br>"
+                f"Indicator: {row['indicator']}<br>"
+                f"{params_str}<br>"
+                f"PF: {row['real_score']:.3f}<br>"
+                f"p-value: {row['p_value']:.3f}<br>"
+                f"Composite: {row['composite_score']:.3f}"
+            )
+
+        df = df.copy()
+        df["hover"] = df.apply(hover_text, axis=1)
         labels = df["signal"].tolist()
-        x = np.arange(len(labels))
 
-        fig = plt.figure(figsize=figsize, constrained_layout=True)
-        fig.suptitle(
-            f"Indicator Grid Search — Top {top_n}"
-            + (" (significant only)" if only_significant else ""),
-            fontsize=14, fontweight="bold",
-        )
-
-        gs = gridspec.GridSpec(2, 2, figure=fig)
-        ax1 = fig.add_subplot(gs[0, 0])
-        ax2 = fig.add_subplot(gs[0, 1])
-        ax3 = fig.add_subplot(gs[1, 0])
-        ax4 = fig.add_subplot(gs[1, 1])
-
-        # Colour map per indicator family
         families = df["indicator"].unique()
-        cmap = plt.get_cmap("tab10")
-        colour_map = {fam: cmap(i) for i, fam in enumerate(families)}
-        bar_colours = [colour_map[fam] for fam in df["indicator"]]
+        palette = [
+            "#5B8CFF", "#00C896", "#FF4C6A", "#FFD166", "#B07FFF",
+            "#FF8C42", "#4ECDC4", "#F7B801", "#A8DADC", "#E76F51",
+        ]
+        colour_map = {fam: palette[i % len(palette)] for i, fam in enumerate(families)}
+        bar_colours = df["indicator"].map(colour_map)
 
-        # --- Panel 1: Profit Factor ---
-        ax1.bar(x, df["real_score"], color=bar_colours, edgecolor="white", linewidth=0.5)
-        ax1.set_title("Profit Factor (real_score)", fontsize=11)
-        ax1.set_xticks(x)
-        ax1.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
-        ax1.set_ylabel("PF")
-        ax1.axhline(1.0, color="red", linestyle="--", linewidth=0.8, alpha=0.7,
-                    label="PF = 1 (break-even)")
-        ax1.legend(fontsize=8)
-
-        # --- Panel 2: P-value ---
-        ax2.bar(x, df["p_value"], color=bar_colours, edgecolor="white", linewidth=0.5)
-        ax2.set_title("MCPT P-value", fontsize=11)
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
-        ax2.set_ylabel("P-value")
-        ax2.axhline(
-            self.p_threshold, color="red", linestyle="--", linewidth=0.8, alpha=0.7,
-            label=f"p = {self.p_threshold} threshold",
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                "Profit Factor (real_score)",
+                "MCPT P-value",
+                "PF vs P-value (todas las señales)",
+                "Composite Score",
+            ),
+            vertical_spacing=0.14,
+            horizontal_spacing=0.10,
         )
-        ax2.set_ylim(0, 1)
-        ax2.legend(fontsize=8)
 
-        # --- Panel 3: Scatter PF vs P-value ---
-        full_df = self.get_summary(only_significant=False)
+        # Panel 1: Profit Factor
+        fig.add_trace(go.Bar(
+            x=labels, y=df["real_score"],
+            marker_color=bar_colours,
+            hovertext=df["hover"], hoverinfo="text",
+            showlegend=False,
+        ), row=1, col=1)
+        fig.add_hline(y=1.0, line=dict(color="white", width=1, dash="dash"), row=1, col=1)
+
+        # Panel 2: P-value
+        fig.add_trace(go.Bar(
+            x=labels, y=df["p_value"],
+            marker_color=bar_colours,
+            hovertext=df["hover"], hoverinfo="text",
+            showlegend=False,
+        ), row=1, col=2)
+        fig.add_hline(y=self.p_threshold, line=dict(color="white", width=1, dash="dash"), row=1, col=2)
+
+        # Panel 3: Scatter PF vs P-value
+        full_df = self.get_summary(only_significant=False).copy()
+        full_df["hover"] = full_df.apply(hover_text, axis=1)
+
         for fam in families:
             sub = full_df[full_df["indicator"] == fam]
             sig = sub[sub["significant"]]
             nsig = sub[~sub["significant"]]
-            ax3.scatter(
-                nsig["p_value"], nsig["real_score"],
-                color=colour_map[fam], alpha=0.4, s=30, label=f"{fam} (n.s.)"
-            )
-            ax3.scatter(
-                sig["p_value"], sig["real_score"],
-                color=colour_map[fam], alpha=0.9, s=60, marker="*",
-                label=f"{fam} (sig.)"
-            )
 
-        ax3.axvline(
-            self.p_threshold, color="red", linestyle="--", linewidth=0.8, alpha=0.7
+            fig.add_trace(go.Scatter(
+                x=nsig["p_value"], y=nsig["real_score"],
+                mode="markers", name=f"{fam} (n.s.)",
+                marker=dict(color=colour_map[fam], size=7, opacity=0.4),
+                hovertext=nsig["hover"], hoverinfo="text",
+                legendgroup=fam,
+            ), row=2, col=1)
+
+            fig.add_trace(go.Scatter(
+                x=sig["p_value"], y=sig["real_score"],
+                mode="markers", name=f"{fam} (sig.)",
+                marker=dict(color=colour_map[fam], size=11, symbol="star", line=dict(width=1, color="white")),
+                hovertext=sig["hover"], hoverinfo="text",
+                legendgroup=fam,
+            ), row=2, col=1)
+
+        fig.add_vline(x=self.p_threshold, line=dict(color="white", width=1, dash="dash"), row=2, col=1)
+
+        # Panel 4: Composite Score
+        fig.add_trace(go.Bar(
+            x=labels, y=df["composite_score"],
+            marker_color=bar_colours,
+            hovertext=df["hover"], hoverinfo="text",
+            showlegend=False,
+        ), row=2, col=2)
+
+        fig.update_xaxes(tickangle=45, row=1, col=1)
+        fig.update_xaxes(tickangle=45, row=1, col=2)
+        fig.update_xaxes(tickangle=45, row=2, col=2)
+
+        fig.update_layout(
+            title=f"Indicator Grid Search — Top {top_n}",
+            template="plotly_dark",
+            height=850, width=1300,
+            showlegend=True,
+            legend=dict(orientation="h", y=-0.25, font=dict(size=9)),
         )
-        ax3.set_xlabel("P-value")
-        ax3.set_ylabel("Profit Factor")
-        ax3.set_title("PF vs P-value (all signals)", fontsize=11)
-        ax3.legend(fontsize=7, ncol=2)
-
-        # --- Panel 4: Composite score ---
-        ax4.bar(
-            x, df["composite_score"],
-            color=bar_colours, edgecolor="white", linewidth=0.5
-        )
-        ax4.set_title("Composite Score (0.6·PF_norm + 0.4·(1−p)_norm)", fontsize=11)
-        ax4.set_xticks(x)
-        ax4.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
-        ax4.set_ylabel("Score")
-
-        # Shared legend for colours
-        handles = [
-            plt.Rectangle((0, 0), 1, 1, color=colour_map[fam], label=fam)
-            for fam in families
-        ]
-        fig.legend(
-            handles=handles, title="Indicator family",
-            loc="lower center", ncol=len(families),
-            bbox_to_anchor=(0.5, -0.02), fontsize=9,
-        )
-
         return fig
 
-    def plot_mc_distributions(
-        self,
-        top_n: int = 6,
-        only_significant: bool = False,
-        figsize: tuple = (14, 8),
-    ) -> plt.Figure:
+    def plot_mc_distributions(self, top_n: int = 6, only_significant: bool = False) -> go.Figure:
+        """Grafica los histogramas empíricos generados por el proceso de barajado Monte Carlo."""
         if self.summary_df is None:
             raise RuntimeError("Call run() first.")
 
@@ -371,31 +384,28 @@ class IndicatorSelector:
 
         ncols = min(3, n)
         nrows = int(np.ceil(n / ncols))
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, constrained_layout=True)
-        fig.suptitle("Monte Carlo Score Distributions", fontsize=13, fontweight="bold")
 
-        axes_flat = np.array(axes).flatten() if n > 1 else [axes]
+        fig = make_subplots(
+            rows=nrows, cols=ncols,
+            subplot_titles=df_top["signal"].tolist(),
+            vertical_spacing=0.15, horizontal_spacing=0.08,
+        )
 
         for i, (_, row) in enumerate(df_top.iterrows()):
-            ax = axes_flat[i]
-            dist = row["_mc_dist"]
-            real = row["real_score"]
-            pv = row["p_value"]
+            r = i // ncols + 1
+            c = i % ncols + 1
 
-            ax.hist(dist, bins=30, color="steelblue", alpha=0.7, edgecolor="white",
-                    linewidth=0.4, label="MC scores")
-            ax.axvline(real, color="crimson", linewidth=1.8,
-                       label=f"Real: {real:.3f}")
-            ax.set_title(row["signal"], fontsize=9, fontweight="bold")
-            ax.set_xlabel("Score", fontsize=8)
-            ax.set_ylabel("Count", fontsize=8)
-            sig_tag = "✓ sig." if row["significant"] else "✗ n.s."
-            ax.legend(
-                title=f"p={pv:.3f}  {sig_tag}", fontsize=7, title_fontsize=7
-            )
+            fig.add_trace(go.Histogram(
+                x=row["_mc_dist"], nbinsx=30,
+                marker_color="#5B8CFF", opacity=0.75,
+                name="MC scores", showlegend=(i == 0),
+            ), row=r, col=c)
 
-        # Hide unused subplots
-        for j in range(i + 1, len(axes_flat)):
-            axes_flat[j].set_visible(False)
+            fig.add_vline(x=row["real_score"], line=dict(color="#FF4C6A", width=2.5), row=r, col=c)
 
+        fig.update_layout(
+            title="Distribuciones Empíricas de Monte Carlo (Ruido vs Realidad)",
+            template="plotly_dark",
+            height=320 * nrows, width=420 * ncols,
+        )
         return fig

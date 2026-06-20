@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
-class Visualizer:
+class VisualizerWalkforward:
     """
     Visualizador interactivo del análisis Walk-Forward para indicadores y modelos.
 

@@ -4,7 +4,7 @@ import pandas as pd
 def prepare_data(df):
     # Transformamos a timestamp y convertimos en índice
     df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.set_index("timestamp")
+    #df = df.set_index("timestamp")
 
     # Eliminamos las columnas: close_time, quote_av, tb_base_av, tb_quote_av y ignore
     cols_to_drop = [
