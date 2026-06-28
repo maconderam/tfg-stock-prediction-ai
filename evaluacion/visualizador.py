@@ -4,35 +4,73 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
-class VisualizerWalkforward:
+class VisualizerWalkForward:
     """
-    Visualizador interactivo del análisis Walk-Forward para indicadores y modelos.
+    Visualizador interactivo del walk-forward para indicadores y modelos.
 
-    Esta clase genera gráficos dinámicos utilizando Plotly para analizar la evolución
-    del precio, los umbrales dinámicos optimizados por cada fold, las señales de
-    operación generadas y la curva de capital (equity curve) resultante.
+    data        : DataFrame OHLCV original con índice temporal
+    fold_results: lista de dicts devuelta por run_indicator(), run_model()
+                  u OptunaWalkForward.run()
+    signal      : pd.Series con la señal completa (mismo índice que data).
+                  Si es None, se reconstruye automáticamente a partir de
+                  los modelos y features guardados en cada fold_result
+                  (requiere que cada fold tenga las claves "model" y
+                  "features", como en OptunaWalkForward).
     """
-
-    def __init__(self, data: pd.DataFrame, fold_results: list, signal: pd.Series, time_col: str = "timestamp"):
+    def __init__(self, data: pd.DataFrame, fold_results: list, signal: pd.Series = None,
+                 time_col: str = "timestamp"):
         self.data         = data
         self.fold_results = fold_results
-        self.signal       = signal
-        self.signal_name  = signal.name or "signal"
         self.time_col     = time_col if time_col in data.columns else None
 
         self.returns = np.log(self.data["close"].shift(-1) / self.data["close"])
 
-        # Construcción interna de las series temporales de señales y retornos acumulados
+        if signal is None:
+            signal = self._reconstruct_signal_from_folds()
+            self.signal_name = "model_prediction"
+        else:
+            self.signal_name = signal.name or "signal"
+
+        self.signal = signal
         self._signal_series, self._equity_curve = self._build_signals_and_equity()
 
+    def _reconstruct_signal_from_folds(self) -> pd.Series:
+        """Reconstruye una señal continua concatenando predicciones por fold.
+
+        Cada fold puede tener un modelo y un conjunto de features distinto
+        (como ocurre en OptunaWalkForward). Predice sobre el test de cada
+        fold usando su propio modelo, y concatena todo en orden temporal.
+        """
+        parts = []
+
+        for r in self.fold_results:
+            if "model" not in r or "features" not in r:
+                raise ValueError(
+                    "Para reconstruir la señal automáticamente, cada fold_result "
+                    "necesita las claves 'model' y 'features' (p.ej. desde "
+                    "OptunaWalkForward). Si no las tiene, pasa el parámetro "
+                    "'signal' explícitamente."
+                )
+
+            test_start = r["test_start"]
+            test_end   = r["test_end"]
+
+            X_test = self.data[r["features"]].iloc[test_start:test_end]
+            y_pred = pd.Series(
+                r["model"].predict(X_test),
+                index=X_test.index,
+            )
+            parts.append(y_pred)
+
+        return pd.concat(parts).sort_index()
+
     def _get_x(self, index):
-        """Devuelve las fechas reales o el componente temporal para un índice dado."""
+        """Devuelve las fechas reales para un índice dado."""
         if self.time_col:
             return self.data.loc[index, self.time_col]
         return index
 
     def _build_signals_and_equity(self):
-        """Une los fragmentos de test de cada fold para reconstruir la señal global sin solapamiento."""
         parts = []
 
         for r in self.fold_results:
@@ -43,8 +81,7 @@ class VisualizerWalkforward:
 
             test_index = self.data.index[test_start:test_end]
 
-            # Desplazamiento temporal para mitigar por completo el sesgo de anticipación
-            sig_fold = self.signal.reindex(test_index).shift(1)
+            sig_fold = self.signal.reindex(test_index).shift(1)  # Shift para evitar look-ahead bias
             ret_fold = self.returns.reindex(test_index)
 
             valid    = sig_fold.notna() & ret_fold.notna()
@@ -72,23 +109,13 @@ class VisualizerWalkforward:
 
     @property
     def has_mcpt(self) -> bool:
-        """Verifica si los resultados de los folds incluyen métricas del test de Monte Carlo."""
         return len(self.fold_results) > 0 and "p_value_high" in self.fold_results[0]
 
+    # ------------------------------------------------------------------
+    # Plot principal
+    # ------------------------------------------------------------------
+
     def plot(self, title: str = None) -> go.Figure:
-        """
-        Genera un gráfico interactivo multi-panel con el rendimiento de la estrategia.
-
-        Divide la visualización en cuatro sub-gráficos alineados por eje temporal:
-        Precio de cierre con puntos de entrada, evolución del indicador con sus umbrales
-        móviles por fold, representación en barras de la señal y la curva de capital.
-
-        Args:
-            title (str, optional): Título personalizado para el gráfico de Plotly.
-
-        Returns:
-            go.Figure: Objeto figura de Plotly listo para ser renderizado o mostrado.
-        """
         fig = make_subplots(
             rows=4, cols=1,
             shared_xaxes=True,
@@ -104,7 +131,7 @@ class VisualizerWalkforward:
 
         idx = self._get_x(self.data.index)
 
-        # --- 1. Gráfico del precio de cierre ---
+        # --- 1. Close ---
         fig.add_trace(go.Scatter(
             x=idx, y=self.data["close"],
             mode="lines", name="Close",
@@ -130,7 +157,7 @@ class VisualizerWalkforward:
                 marker=dict(symbol="triangle-down", color="#FF4C6A", size=8),
             ), row=1, col=1)
 
-        # --- 2. Indicador junto con sus umbrales dinámicos ---
+        # --- 2. Indicador + thresholds ---
         signal_valid = self.signal.dropna()
         fig.add_trace(go.Scatter(
             x=self._get_x(signal_valid.index), y=signal_valid.values,
@@ -147,7 +174,6 @@ class VisualizerWalkforward:
             x0 = self._get_x(x_range[[0]]).iloc[0]
             x1 = self._get_x(x_range[[-1]]).iloc[-1]
 
-            # Inyección visual de las líneas horizontales de umbrales para cada ventana de test
             fig.add_shape(type="line",
                 x0=x0, x1=x1,
                 y0=r["high_thresh"], y1=r["high_thresh"],
@@ -165,7 +191,7 @@ class VisualizerWalkforward:
                 line=dict(color="rgba(200,200,200,0.3)", width=1, dash="dash"),
             )
 
-        # Creación de leyendas manuales para los umbrales punteados
+        # Leyenda manual thresholds
         fig.add_trace(go.Scatter(
             x=[None], y=[None], mode="lines",
             name="High threshold",
@@ -177,7 +203,7 @@ class VisualizerWalkforward:
             line=dict(color="#FF4C6A", dash="dot")
         ), row=2, col=1)
 
-        # --- 3. Representación de la señal ejecutada ---
+        # --- 3. Señal ---
         colours = self._signal_series.map({
             1: "#00C896", -1: "#FF4C6A", 0: "rgba(150,150,150,0.3)"
         })
@@ -192,7 +218,7 @@ class VisualizerWalkforward:
 
         fig.add_hline(y=0, line=dict(color="white", width=0.5), row=3, col=1)
 
-        # --- 4. Curva de rendimiento acumulado (Equity Curve) ---
+        # --- 4. Equity curve ---
         fig.add_trace(go.Scatter(
             x=self._get_x(self._equity_curve.index),
             y=self._equity_curve.values,
@@ -204,7 +230,7 @@ class VisualizerWalkforward:
 
         fig.add_hline(y=0, line=dict(color="white", width=0.5), row=4, col=1)
 
-        # --- Ajustes finales de estilo y maquetación ---
+        # --- Layout ---
         fig.update_layout(
             title=title or f"Walk-Forward — {self.signal_name}",
             template="plotly_dark",
@@ -213,7 +239,7 @@ class VisualizerWalkforward:
             legend=dict(orientation="h", y=-0.05),
         )
 
-        fig.update_yaxes(title_text="Precio",        row=1, col=1)
+        fig.update_yaxes(title_text="Precio",         row=1, col=1)
         fig.update_yaxes(title_text="Valor",          row=2, col=1)
         fig.update_yaxes(title_text="Señal",          row=3, col=1,
                          tickvals=[-1, 0, 1], ticktext=["Short", "Neutral", "Long"])
@@ -221,17 +247,11 @@ class VisualizerWalkforward:
 
         return fig
 
+    # ------------------------------------------------------------------
+    # Plot métricas walk-forward (thresholds + PF)
+    # ------------------------------------------------------------------
+
     def plot_walkforward_metrics(self) -> go.Figure:
-        """
-        Genera gráficos de control temporal para los umbrales y el Profit Factor por fold.
-
-        Permite diagnosticar la estabilidad temporal de los parámetros optimizados y observar
-        si el rendimiento se degrada bruscamente al pasar de entornos in-sample (train)
-        a entornos fuera de muestra (test).
-
-        Returns:
-            go.Figure: Gráfico interactivo con las series de métricas agregadas por fold.
-        """
         df_m  = pd.DataFrame(self.fold_results)
         folds = df_m["fold"]
 
@@ -293,22 +313,18 @@ class VisualizerWalkforward:
 
         return fig
 
+    # ------------------------------------------------------------------
+    # Plot métricas MCPT (p-values + distribución agregada)
+    # ------------------------------------------------------------------
+
     def plot_mcpt_metrics(self, p_threshold: float = 0.05) -> go.Figure:
         """
-        Visualiza la distribución e histórico de p-values calculados mediante MCPT.
+        Requiere que el walk-forward se haya ejecutado con mcpt=True.
 
-        Muestra de manera unificada el comportamiento de la significancia estadística a lo
-        largo del tiempo y la concentración de frecuencias mediante histogramas independientes
-        tanto para umbrales alcistas como bajistas.
-
-        Args:
-            p_threshold (float, optional): Nivel crítico alfa de significancia. Defaults to 0.05.
-
-        Returns:
-            go.Figure: Paneles interactivos con curvas e histogramas de distribución de p-values.
-
-        Raises:
-            RuntimeError: Si los datos provistos en `fold_results` carecen del cálculo de Monte Carlo.
+        Muestra:
+          - P-value high/low por fold con línea de significancia
+          - Distribución agregada de p-values (histograma) con
+            recuento de folds significativos vs no significativos
         """
         if not self.has_mcpt:
             raise RuntimeError(
@@ -334,7 +350,7 @@ class VisualizerWalkforward:
             )
         )
 
-        # --- Panel 1: Evolución secuencial de p-values ---
+        # --- Panel 1: p-values por fold ---
         fig.add_trace(go.Scatter(
             x=folds, y=df_m["p_value_high"],
             mode="lines+markers", name="p_value high",
@@ -355,7 +371,7 @@ class VisualizerWalkforward:
         fig.update_yaxes(title_text="P-value", range=[0, 1], row=1, col=1)
         fig.update_xaxes(title_text="Fold", row=1, col=1)
 
-        # --- Panel 2: Histograma marginal para p_value_high ---
+        # --- Panel 2: histograma p_value_high ---
         fig.add_trace(go.Histogram(
             x=df_m["p_value_high"],
             nbinsx=20,
@@ -372,7 +388,7 @@ class VisualizerWalkforward:
         fig.update_xaxes(title_text="p_value high", range=[0, 1], row=2, col=1)
         fig.update_yaxes(title_text="Frecuencia", row=2, col=1)
 
-        # --- Panel 3: Histograma marginal para p_value_low ---
+        # --- Panel 3: histograma p_value_low ---
         fig.add_trace(go.Histogram(
             x=df_m["p_value_low"],
             nbinsx=20,
@@ -389,7 +405,7 @@ class VisualizerWalkforward:
         fig.update_xaxes(title_text="p_value low", range=[0, 1], row=2, col=2)
         fig.update_yaxes(title_text="Frecuencia", row=2, col=2)
 
-        # --- Cálculo y formateo de anotaciones del sumario general ---
+        # --- Estadísticas resumen como anotación ---
         n_folds       = len(df_m)
         sig_high      = (df_m["p_value_high"] < p_threshold).sum()
         sig_low       = (df_m["p_value_low"]  < p_threshold).sum()
@@ -419,6 +435,195 @@ class VisualizerWalkforward:
                     align="center",
                 )
             ]
+        )
+
+        return fig
+
+    # ------------------------------------------------------------------
+    # Visualizaciones específicas de OptunaWalkForward
+    # (requieren que fold_results tenga la clave "features" por fold)
+    # ------------------------------------------------------------------
+
+    @property
+    def has_features_per_fold(self) -> bool:
+        return len(self.fold_results) > 0 and "features" in self.fold_results[0]
+
+    def plot_feature_usage(self) -> go.Figure:
+        """Muestra qué features se usaron en cada fold (mapa de calor binario).
+
+        Útil para inspeccionar OptunaWalkForward: si una feature aparece en
+        casi todos los folds, es una señal robusta y estable en el tiempo.
+        Si solo aparece en unos pocos folds aislados, podría ser ruido que
+        Optuna aprovechó puntualmente en ese régimen de mercado concreto.
+
+        Returns:
+            Figura de Plotly con un heatmap fold x feature.
+        """
+        if not self.has_features_per_fold:
+            raise RuntimeError(
+                "fold_results no contiene la clave 'features' por fold. "
+                "Este gráfico requiere resultados de OptunaWalkForward."
+            )
+
+        df_m = pd.DataFrame(self.fold_results)
+        folds = df_m["fold"].tolist()
+
+        all_features = sorted(set(f for feats in df_m["features"] for f in feats))
+
+        matrix = np.zeros((len(all_features), len(folds)))
+        for j, feats in enumerate(df_m["features"]):
+            for f in feats:
+                i = all_features.index(f)
+                matrix[i, j] = 1
+
+        usage_pct = matrix.mean(axis=1) * 100
+        order = np.argsort(-usage_pct)
+        matrix_sorted = matrix[order]
+        features_sorted = [all_features[i] for i in order]
+
+        fig = go.Figure(data=go.Heatmap(
+            z=matrix_sorted,
+            x=folds,
+            y=features_sorted,
+            colorscale=[[0, "#1a1a1a"], [1, "#00C896"]],
+            showscale=False,
+            hovertemplate="Fold %{x}<br>%{y}<br>Usada: %{z}<extra></extra>",
+        ))
+
+        fig.update_layout(
+            title="Uso de features por fold (OptunaWalkForward)",
+            template="plotly_dark",
+            height=max(400, 25 * len(features_sorted)),
+            width=1000,
+            xaxis_title="Fold",
+            yaxis_title="Feature",
+        )
+
+        return fig
+
+    def plot_feature_usage_bar(self) -> go.Figure:
+        """Gráfico de barras con el % de folds en que se usó cada feature.
+
+        Complementa a plot_feature_usage() con una vista más directa
+        de qué features son consistentemente elegidas por Optuna.
+
+        Returns:
+            Figura de Plotly con un gráfico de barras horizontal.
+        """
+        if not self.has_features_per_fold:
+            raise RuntimeError(
+                "fold_results no contiene la clave 'features' por fold. "
+                "Este gráfico requiere resultados de OptunaWalkForward."
+            )
+
+        df_m = pd.DataFrame(self.fold_results)
+        n_folds = len(df_m)
+
+        all_features = sorted(set(f for feats in df_m["features"] for f in feats))
+        counts = {f: 0 for f in all_features}
+        for feats in df_m["features"]:
+            for f in feats:
+                counts[f] += 1
+
+        usage = pd.Series(counts).sort_values(ascending=True)
+        pct = usage / n_folds * 100
+
+        fig = go.Figure(go.Bar(
+            x=pct.values,
+            y=pct.index,
+            orientation="h",
+            marker_color="#5B8CFF",
+            hovertemplate="%{y}: %{x:.1f}%% de los folds<extra></extra>",
+        ))
+
+        fig.update_layout(
+            title=f"Frecuencia de uso por feature ({n_folds} folds)",
+            template="plotly_dark",
+            height=max(400, 25 * len(usage)),
+            width=800,
+            xaxis_title="% de folds en que se usó",
+            xaxis_range=[0, 100],
+        )
+
+        return fig
+
+    def plot_pf_evolution(self) -> go.Figure:
+        """Evolución del Profit Factor y, si existe, el p-value, fold a fold.
+
+        A diferencia de plot_walkforward_metrics() (pensado para un único
+        indicador/modelo fijo), este método está pensado para resultados
+        donde cada fold puede tener un modelo distinto (OptunaWalkForward),
+        y opcionalmente muestra el inner_score de la búsqueda de Optuna
+        para comparar con el resultado real en test.
+
+        Returns:
+            Figura de Plotly con 1 o 2 paneles según haya o no MCPT.
+        """
+        df_m  = pd.DataFrame(self.fold_results)
+        folds = df_m["fold"]
+        has_mcpt = "p_value_high" in df_m.columns
+        has_inner = "inner_score" in df_m.columns
+
+        def fmt_inf(s):
+            return s.replace([np.inf, -np.inf], np.nan)
+
+        rows = 2 if has_mcpt else 1
+        titles = ["Profit Factor por fold"]
+        if has_mcpt:
+            titles.append("P-value por fold")
+
+        fig = make_subplots(
+            rows=rows, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.12,
+            subplot_titles=titles,
+        )
+
+        fig.add_trace(go.Scatter(
+            x=folds, y=fmt_inf(df_m["pf_test_long_above"]),
+            mode="lines+markers", name="PF test long above",
+            line=dict(color="#00C896")
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=folds, y=fmt_inf(df_m["pf_test_short_below"]),
+            mode="lines+markers", name="PF test short below",
+            line=dict(color="#FF4C6A")
+        ), row=1, col=1)
+
+        if has_inner:
+            fig.add_trace(go.Scatter(
+                x=folds, y=df_m["inner_score"],
+                mode="lines+markers", name="Inner score (validación Optuna)",
+                line=dict(color="#FFD166", dash="dot")
+            ), row=1, col=1)
+
+        fig.add_hline(y=1.0, line=dict(color="white", width=0.8, dash="dash"), row=1, col=1)
+        fig.update_yaxes(title_text="Profit Factor", row=1, col=1)
+
+        if has_mcpt:
+            fig.add_trace(go.Scatter(
+                x=folds, y=df_m["p_value_high"],
+                mode="lines+markers", name="p_value high",
+                line=dict(color="#00C896")
+            ), row=2, col=1)
+            fig.add_trace(go.Scatter(
+                x=folds, y=df_m["p_value_low"],
+                mode="lines+markers", name="p_value low",
+                line=dict(color="#FF4C6A")
+            ), row=2, col=1)
+            fig.add_hline(y=0.05, line=dict(color="white", width=1, dash="dash"), row=2, col=1)
+            fig.update_yaxes(title_text="P-value", range=[0, 1], row=2, col=1)
+            fig.update_xaxes(title_text="Fold", row=2, col=1)
+        else:
+            fig.update_xaxes(title_text="Fold", row=1, col=1)
+
+        fig.update_layout(
+            title="Evolución por fold",
+            template="plotly_dark",
+            height=350 * rows,
+            width=1000,
+            hovermode="x unified",
+            legend=dict(orientation="h", y=-0.15),
         )
 
         return fig

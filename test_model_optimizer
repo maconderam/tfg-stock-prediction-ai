@@ -1,0 +1,141 @@
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import Lasso
+
+from modelos.models import SklearnModel
+from modelos.model_optimizer import ModelOptimizer
+from evaluacion.optuna_plots import show_all, plot_optimization_history
+
+# ------------------------------------------------------------------
+# 1. Carga de datos
+# ------------------------------------------------------------------
+path = "datos/procesados/BTCUSDT_1d_01-01-2016_18-01-2026.csv"
+df = pd.read_csv(path, index_col=0)
+df = df.dropna()
+
+# ------------------------------------------------------------------
+# 2. Pool de features candidatas (deben existir ya como columnas en df)
+# ------------------------------------------------------------------
+feature_pool = [
+    "rsi_14_3",
+    "rsi_7_3",
+    "%K_14_3",
+    "%D_14_3",
+    "adx_14",
+    "aroonosc_14",
+    "cmma_10_14_1.0",
+    "cmma_20_14_1.0",
+    "madiff_10_50_0",
+    "pi_20",
+    "pco_10_5",
+    "pvr_10_4",
+    "cvr_10_4",
+    "obv_roc_14_14",
+    "cmf_14",
+]
+
+target = "nfr_1_atr_14"
+
+# ------------------------------------------------------------------
+# 3. Constructor del modelo: recibe los hiperparametros del trial
+#    y devuelve una instancia de Model lista para entrenar.
+# ------------------------------------------------------------------
+def build_lasso(params: dict) -> SklearnModel:
+    model = Lasso(**params, random_state=42, max_iter=5000)
+    return SklearnModel(model, name="Lasso")
+
+# ------------------------------------------------------------------
+# 4. Espacio de hiperparametros a explorar
+# ------------------------------------------------------------------
+param_space = {
+    "alpha": ("loguniform", 1e-4, 1.0),
+}
+
+# ------------------------------------------------------------------
+# 5. Configuracion del optimizador
+#
+# k_features=(3, 10) -> Optuna decide tambien cuantas features usar
+# en cada trial, dentro de ese rango, ademas de cuales.
+# ------------------------------------------------------------------
+optimizer = ModelOptimizer(
+    data=df,
+    model_builder=build_lasso,
+    feature_pool=feature_pool,
+    target=target,
+    k_features=(3, 10),                 # Optuna explora tambien el numero de features
+    param_space=param_space,
+    train_window=500,
+    test_window=100,
+    metric="composite_score",           # combina PF + p-value (si mcpt=True)
+    metric_agg="mean",
+    direction="maximize",
+    mcpt=True,                          # activa MCPT por fold (mas lento)
+    n_mcpt=50,                          # pocas permutaciones para que cada trial sea rapido
+    seed=42,
+)
+
+# ------------------------------------------------------------------
+# 6. Metricas absolutas (no normalizadas) del mejor trial
+# ------------------------------------------------------------------
+def show_absolute_metrics(optimizer, label: str):
+    """Imprime las metricas reales (sin normalizar) del mejor trial."""
+    df_metrics = pd.DataFrame(optimizer.best_fold_results)
+
+    def safe_mean(col):
+        return df_metrics[col].replace([np.inf, -np.inf], np.nan).mean()
+
+    def safe_median(col):
+        return df_metrics[col].replace([np.inf, -np.inf], np.nan).median()
+
+    print("=" * 60)
+    print(f"{label}")
+    print("=" * 60)
+    print(f"  Numero de features: {len(optimizer.best_features)}")
+    print(f"  Features:           {optimizer.best_features}")
+    print(f"  Hiperparametros:    {optimizer.best_params}")
+    print()
+    print(f"  PF train high medio:        {safe_mean('pf_train_high'):.4f}")
+    print(f"  PF train low medio:         {safe_mean('pf_train_low'):.4f}")
+    print(f"  PF test long above medio:   {safe_mean('pf_test_long_above'):.4f}")
+    print(f"  PF test short above medio:  {safe_mean('pf_test_short_above'):.4f}")
+    print(f"  PF test long below medio:   {safe_mean('pf_test_long_below'):.4f}")
+    print(f"  PF test short below medio:  {safe_mean('pf_test_short_below'):.4f}")
+    print()
+    print(f"  PF test long above mediana: {safe_median('pf_test_long_above'):.4f}")
+    print(f"  Folds PF test long above >1: {(df_metrics['pf_test_long_above'] > 1).sum()} / {len(df_metrics)}")
+    print(f"  Degradacion (train/test long): {safe_mean('pf_train_high') / safe_mean('pf_test_long_above'):.4f}")
+
+    if "p_value_high" in df_metrics.columns:
+        print()
+        print(f"  P-value high medio:  {safe_mean('p_value_high'):.4f}")
+        print(f"  P-value low medio:   {safe_mean('p_value_low'):.4f}")
+        print(f"  Folds p<0.05 (high): {(df_metrics['p_value_high'] < 0.05).sum()} / {len(df_metrics)}")
+
+    print(f"\n  Composite score (normalizado, NO comparable entre modelos): {optimizer.study.best_value:.4f}")
+    print("=" * 60)
+    print()
+
+    return df_metrics
+
+# ------------------------------------------------------------------
+# 7. Ejecutar la busqueda
+# ------------------------------------------------------------------
+if __name__ == "__main__":
+    study = optimizer.optimize(n_trials=50, show_progress=True)
+
+    optimizer.summary()
+
+    trials_df = optimizer.trials_dataframe()
+    print("\n--- Top 5 trials ---")
+    cols = ["number", "value"]
+    if "params_k_features" in trials_df.columns:
+        cols.append("params_k_features")
+    print(
+        trials_df[cols]
+        .sort_values("value", ascending=False)
+        .head(5)
+        .to_string(index=False)
+    )
+
+    df_lasso = show_absolute_metrics(optimizer, "LASSO")
+    show_all(optimizer)

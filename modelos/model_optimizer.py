@@ -4,7 +4,7 @@ import pandas as pd
 import optuna
 
 from modelos.models import Model
-from .walkforward import WalkForwardEvaluator
+from evaluacion.walkforward import WalkForwardEvaluator
 
 
 class ModelOptimizer:
@@ -25,13 +25,18 @@ class ModelOptimizer:
             Ejemplo: lambda params: SklearnModel(RandomForestRegressor(**params))
         feature_pool: Lista de columnas candidatas a feature.
         target: Nombre de la columna objetivo.
-        k_features: Número fijo de features a seleccionar en cada trial.
+        k_features: Número fijo de features a seleccionar en cada trial,
+            o tupla (low, high) para que Optuna decida también cuántas
+            features usar en cada trial dentro de ese rango.
         param_space: Diccionario {nombre: (tipo, low, high)} o
             {nombre: (tipo, low, high, step)} para cada hiperparámetro.
             Tipos soportados: "int", "float", "loguniform", "categorical".
             Para "categorical" el formato es (tipo, [opciones]).
         train_window: Tamaño de la ventana de entrenamiento del walk-forward.
+            Puede ser un int fijo, o una tupla (low, high) o (low, high, step)
+            para que Optuna explore distintos valores en cada trial.
         test_window: Tamaño de la ventana de test del walk-forward.
+            Mismo formato que train_window: int fijo o tupla para explorar.
         metric: Columna de fold_results a optimizar. Ejemplos:
             "pf_test_long_above", "pf_test_short_below", "pf_train_high",
             "composite_score" (calculado automáticamente por WalkForwardEvaluator
@@ -42,7 +47,9 @@ class ModelOptimizer:
             métricas basadas en p_value o composite_score.
         n_mcpt: Número de permutaciones del MCPT si mcpt=True.
         step: Step del walk-forward (None = test_window).
-        expanding: Modo expanding o rolling del walk-forward.
+        expanding: Modo expanding o rolling del walk-forward. Puede ser un
+            bool fijo, o True/False/"both" para que Optuna explore ambos modos
+            (internamente se sugiere como categorical [True, False]).
         seed: Semilla para reproducibilidad.
     """
 
@@ -54,18 +61,19 @@ class ModelOptimizer:
         target: str,
         k_features: int,
         param_space: dict,
-        train_window: int,
-        test_window: int,
+        train_window,
+        test_window,
         metric: str = "pf_test_long_above",
         metric_agg: str = "mean",
         direction: str = "maximize",
         mcpt: bool = False,
         n_mcpt: int = 100,
         step: int = None,
-        expanding: bool = False,
+        expanding = False,
         seed: int = 42,
     ):
-        if k_features > len(feature_pool):
+        max_k = k_features[1] if isinstance(k_features, (tuple, list)) else k_features
+        if max_k > len(feature_pool):
             raise ValueError("k_features no puede ser mayor que el tamaño de feature_pool")
         if metric_agg not in ("mean", "median"):
             raise ValueError("metric_agg debe ser 'mean' o 'median'")
@@ -90,6 +98,7 @@ class ModelOptimizer:
         self.study           = None
         self.best_features   = None
         self.best_params     = None
+        self.best_wf_params  = None
         self.best_fold_results = None
 
     # ------------------------------------------------------------------
@@ -99,13 +108,23 @@ class ModelOptimizer:
     def _suggest_features(self, trial: optuna.Trial) -> list:
         """Selecciona k_features distintas del pool usando índices sugeridos por Optuna.
 
+        Si self.k_features es un int fijo, se usa tal cual. Si es una tupla
+        (low, high), Optuna decide también cuántas features usar en este
+        trial concreto, dentro de ese rango.
+
         Se sugiere un índice por cada hueco a rellenar y se evita repetir
         features ya elegidas dentro del mismo trial.
         """
+        if isinstance(self.k_features, (tuple, list)):
+            low, high = self.k_features[0], self.k_features[1]
+            k = trial.suggest_int("k_features", low, high)
+        else:
+            k = self.k_features
+
         available = list(self.feature_pool)
         chosen = []
 
-        for i in range(self.k_features):
+        for i in range(k):
             idx = trial.suggest_int(f"feature_idx_{i}", 0, len(available) - 1)
             chosen.append(available.pop(idx))
 
@@ -140,19 +159,49 @@ class ModelOptimizer:
 
         return params
 
+    def _suggest_walkforward_params(self, trial: optuna.Trial) -> dict:
+        """Resuelve train_window, test_window y expanding para este trial.
+
+        Si el atributo correspondiente es un int/bool fijo, se usa tal cual.
+        Si es una tupla (low, high) o (low, high, step), se sugiere a Optuna
+        un valor dentro de ese rango. Si expanding es "both", se sugiere
+        como categorical entre True y False.
+        """
+        def resolve_int(name, value):
+            if isinstance(value, (tuple, list)):
+                low, high = value[0], value[1]
+                step = value[2] if len(value) > 2 else 1
+                return trial.suggest_int(name, low, high, step=step)
+            return value
+
+        train_window = resolve_int("train_window", self.train_window)
+        test_window  = resolve_int("test_window", self.test_window)
+
+        if self.expanding == "both":
+            expanding = trial.suggest_categorical("expanding", [True, False])
+        else:
+            expanding = self.expanding
+
+        return {
+            "train_window": train_window,
+            "test_window":  test_window,
+            "expanding":    expanding,
+        }
+
     def _objective(self, trial: optuna.Trial) -> float:
         """Función objetivo: entrena un walk-forward completo y devuelve la métrica agregada."""
         features = self._suggest_features(trial)
         params   = self._suggest_params(trial)
+        wf_params = self._suggest_walkforward_params(trial)
 
         model = self.model_builder(params)
 
         wf = WalkForwardEvaluator(
             self.data,
-            train_window=self.train_window,
-            test_window=self.test_window,
+            train_window=wf_params["train_window"],
+            test_window=wf_params["test_window"],
             step=self.step,
-            expanding=self.expanding,
+            expanding=wf_params["expanding"],
         )
 
         try:
@@ -217,7 +266,13 @@ class ModelOptimizer:
         best_trial = self.study.best_trial
         self.best_features     = best_trial.user_attrs.get("features")
         self.best_params        = {
-            k: v for k, v in best_trial.params.items() if not k.startswith("feature_idx_")
+            k: v for k, v in best_trial.params.items()
+            if not k.startswith("feature_idx_")
+            and k not in ("train_window", "test_window", "expanding", "k_features")
+        }
+        self.best_wf_params     = {
+            k: v for k, v in best_trial.params.items()
+            if k in ("train_window", "test_window", "expanding")
         }
         self.best_fold_results  = best_trial.user_attrs.get("fold_results")
 
@@ -240,6 +295,10 @@ class ModelOptimizer:
         print("\n--- Mejores hiperparámetros ---")
         for k, v in self.best_params.items():
             print(f"  {k}: {v}")
+        if self.best_wf_params:
+            print("\n--- Mejor configuración walk-forward ---")
+            for k, v in self.best_wf_params.items():
+                print(f"  {k}: {v}")
         print("=" * 60)
 
     def trials_dataframe(self) -> pd.DataFrame:

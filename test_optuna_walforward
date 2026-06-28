@@ -1,0 +1,65 @@
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import Lasso
+
+from modelos.models import SklearnModel
+from modelos.model_optimizer import ModelOptimizer
+from evaluacion.optuna_walkforward import OptunaWalkForward
+# ------------------------------------------------------------------
+# 1. Carga de datos
+# ------------------------------------------------------------------
+path = "datos/procesados/BTCUSDT_1d_01-01-2016_18-01-2026.csv"
+df = pd.read_csv(path, index_col=0)
+df = df.dropna()
+
+# ------------------------------------------------------------------
+# 2. Pool de features candidatas (deben existir ya como columnas en df)
+# ------------------------------------------------------------------
+feature_pool = [
+    "rsi_14_3",
+    "rsi_7_3",
+    "%K_14_3",
+    "%D_14_3",
+    "adx_14",
+    "aroonosc_14",
+    "cmma_10_14_1.0",
+    "madiff_10_50_0",
+    "pi_20",
+    "pco_10_5",
+    "pvr_10_4",
+    "cvr_10_4",
+]
+
+target = "nfr_1_atr_14"
+
+# ------------------------------------------------------------------
+# 3. Constructor del modelo: recibe los hiperparametros del trial
+#    y devuelve una instancia de Model lista para entrenar.
+# ------------------------------------------------------------------
+def build_lasso(params: dict) -> SklearnModel:
+    model = Lasso(**params, random_state=42, max_iter=5000)
+    return SklearnModel(model, name="Lasso")
+
+
+# ------------------------------------------------------------------
+# 5. Configuracion del optimizador
+#
+# k_features=(3, 10) -> Optuna decide tambien cuantas features usar
+# en cada trial, dentro de ese rango, ademas de cuales.
+# ------------------------------------------------------------------
+owf = OptunaWalkForward(
+    data=df,
+    model_builder=build_lasso,
+    feature_pool=feature_pool,
+    target="nfr_1_atr_14",
+    k_features=(3, 8),
+    param_space={"alpha": ("loguniform", 1e-4, 1.0)},
+    train_window=500,
+    test_window=100,
+    n_trials_per_fold=20,
+    mcpt=True,
+    n_mcpt=200,
+)
+
+fold_results = owf.run()
+owf.summary()
